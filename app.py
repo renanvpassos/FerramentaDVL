@@ -1,97 +1,97 @@
-import streamlit as st
+import io
+import re
 import pandas as pd
-from io import BytesIO
+import pdfplumber
+import streamlit as st
 
-# Configuração da página do Streamlit
-st.set_page_config(page_title="Tratamento planilha DVL", layout="centered")
+st.set_page_config(
+    page_title="Extrator de Invoice PDF", page_icon="📄", layout="wide"
+)
 
-st.title("📊 Tratamento planilha DVL")
-st.markdown("Insira os parâmetros abaixo, suba os arquivos e realize os cálculos automaticamente.")
+st.title("📄 Extrator de Dados de Invoice (PDF -> Excel)")
+st.write(
+    "Faça o upload do seu relatório em PDF para extrair as informações e gerar a planilha Excel."
+)
 
-# --- SEÇÃO 1: PARÂMETROS DA INTERFACE ---
-st.subheader("1. Configurações Padrão")
-# Campo do ICMS posicionado no topo do fluxo principal
-valor_icms = st.text_input("Valor do ICMS padrão (será aplicado em todas as linhas):", value="18")
 
-st.markdown("---")
+def extract_data_from_pdf(pdf_file):
+    records = []
+    current_invoice = None
 
-# --- SEÇÃO 2: UPLOAD DOS ARQUIVOS ---
-st.subheader("2. Upload dos Arquivos")
-arquivo_bd = st.file_uploader("Suba a planilha de BANCO DE DADOS (Excel)", type=["xlsx", "xls"])
-arquivo_tratar = st.file_uploader("Suba a PLANILHA A SER TRATADA (Excel)", type=["xlsx", "xls"])
+    # Regex Patterns
+    # Busca "Number / Date" seguido por dígitos (Invoice)
+    invoice_pattern = re.compile(
+        r"Number\s*/\s*Date\s*\n?\s*(\d+)", re.IGNORECASE
+    )
 
-if arquivo_bd and arquivo_tratar:
-    st.success("Arquivos carregados com sucesso! Processando...")
+    # Captura a linha de item:
+    # 1. Item ID (6 dígitos)
+    # 2. Part Number (9 dígitos)
+    # 3. Descrição (texto intermediário)
+    # 4. Quantidade (número inteiro ou decimal)
+    # 5. Peso Total (Net - número decimal/inteiro)
+    # 6. Preço Total (Total - número decimal/inteiro)
+    item_pattern = re.compile(
+        r"^\s*\d{6}\s+(\d{9})\s+(.*?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s*$",
+        re.MULTILINE,
+    )
 
-    try:
-        # Lendo as planilhas
-        df_bd = pd.read_excel(arquivo_bd)
-        df_tratar = pd.read_excel(arquivo_tratar)
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
 
-        # Padronizando o nome das colunas para evitar erros de espaços ou maiúsculas/minúsculas
-        df_bd.columns = df_bd.columns.str.strip()
-        df_tratar.columns = df_tratar.columns.str.strip()
+            # Atualiza a Invoice se encontrada na página corrente
+            invoice_match = invoice_pattern.search(text)
+            if invoice_match:
+                current_invoice = invoice_match.group(1)
 
-        # Validação de colunas necessárias no Banco de Dados
-        colunas_bd_obrigatorias = ['Material', 'peso liquido']
-        validacao_bd = all(col in df_bd.columns for col in colunas_bd_obrigatorias)
+            # Extrai todas as linhas de itens presentes na página
+            for match in item_pattern.finditer(text):
+                part_number = match.group(1)
+                qty = match.group(3)
+                peso_total = match.group(4)
+                preco_total = match.group(5)
 
-        # Validação de colunas necessárias na Planilha a ser tratada
-        colunas_tratar_obrigatorias = ['PARTNUMBER', 'QUANTIDADE']
-        validacao_tratar = all(col in df_tratar.columns for col in colunas_tratar_obrigatorias)
+                records.append({
+                    "Invoice": current_invoice if current_invoice else "N/A",
+                    "PartNumber": part_number,
+                    "Quantidade": qty,
+                    "PesoTotal": peso_total,
+                    "PrecoTotal": preco_total,
+                })
 
-        if not validacao_bd:
-            st.error(
-                f"O Banco de Dados precisa conter as colunas: {colunas_bd_obrigatorias}. Encontradas: {list(df_bd.columns)}")
-        elif not validacao_tratar:
-            st.error(
-                f"A Planilha a ser tratada precisa conter as colunas: {colunas_tratar_obrigatorias}. Encontradas: {list(df_tratar.columns)}")
-        else:
-            # --- Início do Tratamento ---
+    return pd.DataFrame(records)
 
-            # 1. Cria a coluna ICMS no final com o valor informado no campo acima
-            df_tratar['ICMS'] = valor_icms
 
-            # 2. Faz o cruzamento (Merge) entre as tabelas
-            # Remove duplicadas do banco de dados na coluna chave para não duplicar linhas na planilha final
-            df_bd_limpo = df_bd.drop_duplicates(subset=['Material'])
+# Interface de Upload
+uploaded_file = st.file_uploader(
+    "Selecione o arquivo PDF", type=["pdf"]
+)
 
-            df_resultado = pd.merge(
-                df_tratar,
-                df_bd_limpo[['Material', 'peso liquido']],
-                left_on='PARTNUMBER',
-                right_on='Material',
-                how='left'
-            )
+if uploaded_file is not None:
+    with st.spinner("Processando o arquivo PDF..."):
+        df = extract_data_from_pdf(uploaded_file)
 
-            # 3. Converte colunas para numérico para evitar erros de tipo no cálculo
-            df_resultado['QUANTIDADE'] = pd.to_numeric(df_resultado['QUANTIDADE'], errors='coerce').fillna(0)
-            df_resultado['peso liquido'] = pd.to_numeric(df_resultado['peso liquido'], errors='coerce').fillna(0)
+    if not df.empty:
+        st.success(f"Extração concluída! {len(df)} itens encontrados.")
 
-            # 4. Calcula o PESOTOTAL (criado logo após a coluna ICMS)
-            df_resultado['PESOTOTAL'] = df_resultado['peso liquido'] * df_resultado['QUANTIDADE']
+        # Visualização da Tabela
+        st.dataframe(df, use_container_width=True)
 
-            # 5. Remove colunas extras trazidas do banco de dados para manter o layout limpo
-            if 'Material' in df_resultado.columns:
-                df_resultado = df_resultado.drop(columns=['Material', 'peso liquido'])
+        # Download para Excel
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Invoices")
 
-            # Exibe uma prévia do resultado na tela
-            st.subheader("💡 Prévia do Resultado")
-            st.dataframe(df_resultado.head(10))
-
-            # --- Preparação do arquivo para Download ---
-            saida_excel = BytesIO()
-            with pd.ExcelWriter(saida_excel, engine='xlsxwriter') as writer:
-                df_resultado.to_excel(writer, index=False, sheet_name='Planilha Tratada')
-            saida_excel.seek(0)
-
-            st.subheader("3. Baixar Arquivo Final")
-            st.download_button(
-                label="📥 Baixar Planilha Tratada (Excel)",
-                data=saida_excel,
-                file_name="planilha_tratada_final.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-    except Exception as e:
-        st.error(f"Ocorreu um erro ao processar os arquivos: {e}")
+        st.download_button(
+            label="📥 Baixar Planilha Excel",
+            data=buffer.getvalue(),
+            file_name="dados_invoices.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+    else:
+        st.warning(
+            "Nenhum dado foi encontrado com o padrão especificado. Verifique a estrutura do PDF."
+        )
