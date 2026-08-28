@@ -1,5 +1,7 @@
 streamlit
-pdf2docx
-python-docx
+pdfplumber
 pandas
 openpyxl
+pdf2image
+pytesseract
+Pillow
