@@ -18,49 +18,57 @@ def extract_data_from_pdf(pdf_file):
     records = []
     current_invoice = None
 
-    # Regex Patterns
-    # Busca "Number / Date" seguido por dígitos (Invoice)
-    invoice_pattern = re.compile(
-        r"Number\s*/\s*Date\s*\n?\s*(\d+)", re.IGNORECASE
+    # Expressões Regulares Flexíveis
+    # 1. Busca Invoice após "Number / Date"
+    invoice_regex = re.compile(
+        r"Number\s*/\s*Date\s*[:\s]*(\d+)", re.IGNORECASE
     )
 
-    # Captura a linha de item:
-    # 1. Item ID (6 dígitos)
-    # 2. Part Number (9 dígitos)
-    # 3. Descrição (texto intermediário)
-    # 4. Quantidade (número inteiro ou decimal)
-    # 5. Peso Total (Net - número decimal/inteiro)
-    # 6. Preço Total (Total - número decimal/inteiro)
-    item_pattern = re.compile(
-        r"^\s*\d{6}\s+(\d{9})\s+(.*?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s*$",
+    # 2. Localiza blocos de itens iniciados por um código de 6 dígitos seguido do PartNumber de 9 dígitos
+    # Captura até o próximo item de 6 dígitos ou fim da página
+    item_block_regex = re.compile(
+        r"(?:^\s*|\n\s*)(\d{6})\s+(\d{9})\s+([\s\S]*?)(?=(?:\n\s*\d{6}\s+\d{9})|\Z)",
         re.MULTILINE,
     )
 
+    # 3. Extrai os 3 últimos números do bloco do item (Qty, Peso, Preço)
+    # Suporta formatos: 100 | 1,000.00 | 1.000,00 | 12,5
+    number_regex = re.compile(r"[-+]?\d+(?:[\.,]\d+)*")
+
     with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
+        for page_num, page in enumerate(pdf.pages, start=1):
             text = page.extract_text()
             if not text:
                 continue
 
-            # Atualiza a Invoice se encontrada na página corrente
-            invoice_match = invoice_pattern.search(text)
-            if invoice_match:
-                current_invoice = invoice_match.group(1)
+            # Busca se há uma nova Invoice nesta página
+            inv_match = invoice_regex.search(text)
+            if inv_match:
+                current_invoice = inv_match.group(1)
 
-            # Extrai todas as linhas de itens presentes na página
-            for match in item_pattern.finditer(text):
-                part_number = match.group(1)
-                qty = match.group(3)
-                peso_total = match.group(4)
-                preco_total = match.group(5)
+            # Busca todos os blocos de itens
+            for match in item_block_regex.finditer(text):
+                part_number = match.group(2)
+                block_content = match.group(3)
 
-                records.append({
-                    "Invoice": current_invoice if current_invoice else "N/A",
-                    "PartNumber": part_number,
-                    "Quantidade": qty,
-                    "PesoTotal": peso_total,
-                    "PrecoTotal": preco_total,
-                })
+                # Busca todos os números no conteúdo restante do item
+                numbers = number_regex.findall(block_content)
+
+                # Se encontrarmos pelo menos os 3 valores finais (Qty, Net, Total)
+                if len(numbers) >= 3:
+                    qty = numbers[-3]
+                    peso_total = numbers[-2]
+                    preco_total = numbers[-1]
+
+                    records.append({
+                        "Invoice": (
+                            current_invoice if current_invoice else "N/A"
+                        ),
+                        "PartNumber": part_number,
+                        "Quantidade": qty,
+                        "PesoTotal": peso_total,
+                        "PrecoTotal": preco_total,
+                    })
 
     return pd.DataFrame(records)
 
@@ -76,11 +84,8 @@ if uploaded_file is not None:
 
     if not df.empty:
         st.success(f"Extração concluída! {len(df)} itens encontrados.")
-
-        # Visualização da Tabela
         st.dataframe(df, use_container_width=True)
 
-        # Download para Excel
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Invoices")
@@ -92,6 +97,16 @@ if uploaded_file is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
     else:
-        st.warning(
-            "Nenhum dado foi encontrado com o padrão especificado. Verifique a estrutura do PDF."
+        st.error(
+            "Nenhum dado foi encontrado com a nova estrutura. Veja abaixo o texto bruto extraído para diagnosticar."
         )
+
+        # Ferramenta de diagnóstico inline se falhar novamente
+        with pdfplumber.open(uploaded_file) as pdf:
+            sample_text = (
+                pdf.pages[0].extract_text()
+                if len(pdf.pages) > 0
+                else "PDF sem texto"
+            )
+            st.subheader("Texto bruto extraído da 1ª página:")
+            st.code(sample_text)
