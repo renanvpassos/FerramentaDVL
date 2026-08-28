@@ -1,102 +1,123 @@
 import streamlit as st
-import pdfplumber
+from pdf2docx import Converter
+import docx
 import pandas as pd
 import re
+import tempfile
+import os
 import io
 
-def inspect_pdf_text(pdf_file):
-    """Extrai todas as linhas de texto cruas marcadas por página para visualização."""
-    raw_pages = []
-    with pdfplumber.open(pdf_file) as pdf:
-        for idx, page in enumerate(pdf.pages):
-            text = page.extract_text() or ""
-            lines = [line.strip() for line in text.split('\n') if line.strip()]
-            raw_pages.append({"pagina": idx + 1, "linhas": lines})
-    return raw_pages
+def process_pdf_via_docx(pdf_file):
+    # Salva o arquivo enviado temporariamente para a conversão
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        tmp_pdf.write(pdf_file.read())
+        tmp_pdf_path = tmp_pdf.name
 
-def parse_pdf(pdf_file):
-    records = []
-    current_invoice = None
+    tmp_docx_path = tmp_pdf_path.replace(".pdf", ".docx")
 
-    # Regex Patterns
-    invoice_pattern = re.compile(r'Number\s*/\s*Date\s+([A-Za-z0-9\-_]+)', re.IGNORECASE)
-    item_pattern = re.compile(
-        r'\b\d{6}\b\s+(\d{9})\s+(.*?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)$'
-    )
+    try:
+        # Step 1: Converte PDF -> DOCX (Reconstrói tabelas automaticamente)
+        cv = Converter(tmp_pdf_path)
+        cv.convert(tmp_docx_path, start=0, end=None)
+        cv.close()
 
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if not text:
-                continue
+        # Step 2: Lê o documento Word convertido
+        doc = docx.Document(tmp_docx_path)
+        
+        preview_tables = []
+        extracted_records = []
+        current_invoice = None
 
-            lines = text.split('\n')
-            for line in lines:
-                line_clean = line.strip()
+        # Regex para identificar Invoice
+        invoice_pattern = re.compile(r'Number\s*/\s*Date\s+([A-Za-z0-9\-_]+)', re.IGNORECASE)
 
-                inv_match = invoice_pattern.search(line_clean)
+        # Primeiro varre parágrafos fora de tabelas buscando a Invoice
+        # E varre as tabelas reconstruídas
+        for table_idx, table in enumerate(doc.tables):
+            table_data = []
+            for row in table.rows:
+                row_cells = [cell.text.strip().replace('\n', ' ') for cell in row.cells]
+                table_data.append(row_cells)
+
+                row_str = " ".join(row_cells)
+
+                # Atualiza a invoice se encontrar na tabela
+                inv_match = invoice_pattern.search(row_str)
                 if inv_match:
                     current_invoice = inv_match.group(1)
-                    continue
 
-                item_match = item_pattern.search(line_clean)
-                if item_match and current_invoice:
-                    part_number = item_match.group(1)
-                    quantidade = item_match.group(3)
-                    peso_total = item_match.group(4)
-                    preco_total = item_match.group(5)
+                # Busca o item (PartNumber de 9 dígitos)
+                # Verifica se a linha possui células suficientes e o PartNumber correto
+                for i, cell_text in enumerate(row_cells):
+                    pn_match = re.search(r'\b\d{9}\b', cell_text)
+                    if pn_match:
+                        part_number = pn_match.group(0)
+                        
+                        # Captura valores das colunas vizinhas na mesma linha da tabela
+                        # Ajuste os índices conforme a estrutura das colunas no seu documento
+                        quantidade = row_cells[i+1] if i+1 < len(row_cells) else ""
+                        peso_total = row_cells[i+2] if i+2 < len(row_cells) else ""
+                        preco_total = row_cells[i+3] if i+3 < len(row_cells) else ""
 
-                    records.append({
-                        "Invoice": current_invoice,
-                        "PartNumber": part_number,
-                        "Quantidade": quantidade,
-                        "PesoTotal": peso_total,
-                        "PrecoTotal": preco_total
-                    })
+                        extracted_records.append({
+                            "Invoice": current_invoice or "N/A",
+                            "PartNumber": part_number,
+                            "Quantidade": quantidade,
+                            "PesoTotal": peso_total,
+                            "PrecoTotal": preco_total
+                        })
 
-    return pd.DataFrame(records)
+            if table_data:
+                df_table = pd.DataFrame(table_data)
+                preview_tables.append((table_idx + 1, df_table))
+
+        return preview_tables, pd.DataFrame(extracted_records)
+
+    finally:
+        # Limpeza de arquivos temporários
+        if os.path.exists(tmp_pdf_path):
+            os.remove(tmp_pdf_path)
+        if os.path.exists(tmp_docx_path):
+            os.remove(tmp_docx_path)
+
 
 # Interface Streamlit
-st.set_page_config(page_title="Leitor e Extrator de PDF", layout="wide")
-st.title("📄 Inspeção e Extração de PDF para Excel")
+st.set_page_config(page_title="PDF via DOCX Converter", layout="wide")
+st.title("📄 Extrator de PDF (via Reconstrução DOCX)")
 
-uploaded_file = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
+uploaded_file = st.file_uploader("Upload do arquivo PDF", type=["pdf"])
 
 if uploaded_file is not None:
-    # Criação de abas para separar a pré-visualização da tabela final
-    tab_inspect, tab_result = st.tabs(["🔍 Inspeção das Linhas Lidas (Pré-processamento)", "📊 Tabela Final Extraída"])
+    tab_preview, tab_final = st.tabs(["🧩 Tabelas Reconstruídas (Visualização Word)", "📊 Planilha Final Extraída"])
 
-    with tab_inspect:
-        st.subheader("Texto Cru Extraído por Página")
-        st.caption("Verifique aqui como o leitor lê as linhas do PDF para entender se o layout está correto.")
-        
-        pages_data = inspect_pdf_text(uploaded_file)
-        
-        for page in pages_data:
-            with st.expander(f"Página {page['pagina']} ({len(page['linhas'])} linhas detectadas)", expanded=(page['pagina'] == 1)):
-                # Exibe em formato de tabela interativa para fácil inspeção
-                df_lines = pd.DataFrame(page['linhas'], columns=["Linha de Texto Capturada"])
-                st.dataframe(df_lines, use_container_width=True)
+    with st.spinner("Convertendo PDF para Word e detectando estrutura de tabelas..."):
+        tables_preview, df_final = process_pdf_via_docx(uploaded_file)
 
-    with tab_result:
-        uploaded_file.seek(0)  # Reseta o ponteiro do arquivo
-        with st.spinner("Processando extração..."):
-            df = parse_pdf(uploaded_file)
+    with tab_preview:
+        st.subheader("Tabelas Detectadas Após Conversão")
+        st.caption("Abaixo estão as tabelas exatamente como o Word as enxergou após a conversão do PDF.")
+        if tables_preview:
+            for idx, df_t in tables_preview:
+                st.write(f"**Tabela #{idx}** ({len(df_t)} linhas)")
+                st.dataframe(df_t, use_container_width=True)
+        else:
+            st.warning("Nenhuma tabela estruturada foi identificada no documento.")
 
-        if not df.empty:
-            st.success(f"{len(df)} itens identificados e estruturados com sucesso!")
-            st.dataframe(df, use_container_width=True)
+    with tab_final:
+        if not df_final.empty:
+            st.success(f"Extração concluída! {len(df_final)} itens organizados.")
+            st.dataframe(df_final, use_container_width=True)
 
             buffer = io.BytesIO()
             with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Invoices')
+                df_final.to_excel(writer, index=False, sheet_name='Invoices')
             buffer.seek(0)
 
             st.download_button(
-                label="📥 Baixar Planilha Excel",
+                label="📥 Baixar Excel Tratado",
                 data=buffer,
                 file_name="relatorio_invoices.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
         else:
-            st.error("Nenhum item foi capturado. Compare os padrões das linhas na aba 'Inspeção' para ajustar os filtros.")
+            st.error("Não foi possível montar a planilha final. Confira as tabelas na primeira aba para conferir em quais colunas os dados ficaram posicionados.")
