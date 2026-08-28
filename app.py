@@ -1,110 +1,88 @@
 import streamlit as st
+import pdfplumber
 import pandas as pd
-from pypdf import PdfReader
-import io
 import re
-import os
+import io
 
-# --- CONFIGURAÇÃO DAS EXPRESSÕES REGULARES ---
-# ATENÇÃO: Você deve ajustar estas expressões para corresponder ao formato exato dos seus PDFs.
-# As expressões abaixo são exemplos e precisarão ser customizadas.
+def parse_pdf(pdf_file):
+    records = []
+    current_invoice = None
 
-def extract_data(pdf_file_bytes):
-    """
-    Função que lê o PDF e tenta extrair as informações usando regex.
-    Esta função é o coração da lógica de extração.
-    """
-    try:
-        reader = PdfReader(io.BytesIO(pdf_file_bytes))
-        text = ""
-        # Junta todo o texto do PDF em uma única string
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        
-        # --- LÓGICA DE EXTRAÇÃO BASEADA EM PADRÕES ---
-        
-        # Exemplo de como procurar (você deve customizar estes padrões):
-        
-        # 1. Invoice (Material)
-        # Tenta encontrar algo como "Invoice Number: [número]" ou similar
-        invoice_match = re.search(r"Invoice\s*Number[:\s]*(\w+)", text, re.IGNORECASE)
-        invoice_number = invoice_match.group(1).strip() if invoice_match else "NÃO ENCONTRADO"
+    # Regex Patterns
+    # Busca "Number / Date" seguido pelo número da invoice (ex: Number / Date 12345678)
+    invoice_pattern = re.compile(r'Number\s*/\s*Date\s+([A-Za-z0-9\-_]+)', re.IGNORECASE)
+    
+    # Captura a linha do item:
+    # 1. Item ID (6 dígitos) -> \b\d{6}\b
+    # 2. PartNumber (9 dígitos) -> (\d{9})
+    # 3. Descrição (texto) -> (.*?)
+    # 4. Quantidade -> ([\d\.,]+)
+    # 5. Peso Total (Net) -> ([\d\.,]+)
+    # 6. Preço Total (Total) -> ([\d\.,]+)
+    item_pattern = re.compile(
+        r'\b\d{6}\b\s+(\d{9})\s+(.*?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)$'
+    )
 
-        # 2. PartNumber
-        # Tenta encontrar números de 9 dígitos (ex: PartNumber: 123456789)
-        partnumber_matches = re.findall(r"PartNumber[:\s]*(\d{9})", text, re.IGNORECASE)
-        partnumbers = [match[0] for match in partnumber_matches] if partnumber_matches else ["NÃO ENCONTRADO"]
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if not text:
+                continue
 
-        # 3. Quantidade (Qty/Unit)
-        # Tenta encontrar números decimais ou inteiros após uma descrição de item
-        # Exemplo: Procurar por "Quantity" seguido de um número
-        quantity_match = re.search(r"Quantity[:\s]*([\d\.]+)", text, re.IGNORECASE)
-        quantity = quantity_match.group(1).strip() if quantity_match else "NÃO ENCONTRADO"
+            lines = text.split('\n')
+            for line in lines:
+                line_clean = line.strip()
 
-        # 4. PesoTotal (Net)
-        # Tenta encontrar valores monetários ou pesos (com casas decimais)
-        # Exemplo: Procurar por "Peso Total: 15.50 kg"
-        weight_match = re.search(r"PesoTotal[:\s]*([\d\.]+)", text, re.IGNORECASE)
-        weight_total = weight_match.group(1).strip() if weight_match else "NÃO ENCONTRADO"
-        
-        # 5. PrecoTotal (Total)
-        # Exemplo: Procurar por "Preco Total: 1234.56"
-        price_match = re.search(r"PrecoTotal[:\s]*([\d\.]+)", text, re.IGNORECASE)
-        price_total = price_match.group(1).strip() if price_match else "NÃO ENCONTRADO"
-        
-        
-        # Estruturação dos dados
-        extracted_data = {
-            "Invoice": invoice_number,
-            "PartNumber": "; ".join(partnumbers), # Junta vários se encontrado
-            "Quantidade": quantity,
-            "PesoTotal": weight_total,
-            "PrecoTotal": price_total
-        }
-        
-        return extracted_data
+                # Verifica se há atualização de Invoice na página/linha
+                inv_match = invoice_pattern.search(line_clean)
+                if inv_match:
+                    current_invoice = inv_match.group(1)
+                    continue
 
-    except Exception as e:
-        st.error(f"Ocorreu um erro durante a extração: {e}")
-        return None
+                # Busca padrão de itens
+                item_match = item_pattern.search(line_clean)
+                if item_match and current_invoice:
+                    part_number = item_match.group(1)
+                    quantidade = item_match.group(3)
+                    peso_total = item_match.group(4)
+                    preco_total = item_match.group(5)
 
-# --- INTERFACE STREAMLIT ---
+                    records.append({
+                        "Invoice": current_invoice,
+                        "PartNumber": part_number,
+                        "Quantidade": quantidade,
+                        "PesoTotal": peso_total,
+                        "PrecoTotal": preco_total
+                    })
 
-st.title("📄 Extrator de Dados de PDF para Excel")
-st.markdown("Faça o upload de um arquivo PDF para extrair informações de notas fiscais/faturas e exportar para uma planilha.")
+    return pd.DataFrame(records)
 
-uploaded_file = st.file_uploader("Escolha um arquivo PDF", type="pdf")
+# Interface Streamlit
+st.set_page_config(page_title="PDF Extractor to Excel", layout="wide")
+st.title("📄 Extrator de PDF para Excel")
+st.write("Faça o upload do documento PDF para extrair as Invoices e itens correspondentes.")
+
+uploaded_file = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
 
 if uploaded_file is not None:
-    # 1. Ler o arquivo e preparar para extração
-    try:
-        pdf_bytes = uploaded_file.read()
-        st.info("PDF carregado com sucesso. Iniciando extração...")
-        
-        # 2. Executar a extração
-        data = extract_data(pdf_bytes)
-        
-        if data:
-            # 3. Criar o DataFrame do Pandas
-            df = pd.DataFrame([data])
-            
-            st.success("Extração concluída!")
-            
-            # 4. Exibir os resultados
-            st.subheader("✅ Dados Extraídos:")
-            st.dataframe(df)
-            
-            # 5. Gerar o download do Excel
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="📥 Baixar Resultado em Excel (.xlsx)",
-                data=df.to_excel(io.BytesIO(), index=False),
-                file_name=f"{uploaded_file.name.replace('.pdf', '')}_dados.xlsx",
-                mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            )
+    with st.spinner("Processando e extraindo dados do PDF..."):
+        df = parse_pdf(uploaded_file)
 
-    except Exception as e:
-        st.error(f"Houve um erro geral ao processar o arquivo: {e}")
+    if not df.empty:
+        st.success(f"Extração concluída! {len(df)} itens encontrados.")
+        st.dataframe(df, use_container_width=True)
 
-else:
-    st.info("Por favor, faça o upload de um arquivo PDF para começar a extração.")
+        # Exportação para Excel em memória
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Invoices')
+        buffer.seek(0)
+
+        st.download_button(
+            label="📥 Baixar Planilha Excel",
+            data=buffer,
+            file_name="relatorio_invoices.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.warning("Nenhum dado no padrão esperado foi localizado no PDF. Verifique a estrutura do documento.")
