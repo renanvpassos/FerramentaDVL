@@ -4,21 +4,22 @@ import pandas as pd
 import re
 import io
 
+def inspect_pdf_text(pdf_file):
+    """Extrai todas as linhas de texto cruas marcadas por página para visualização."""
+    raw_pages = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for idx, page in enumerate(pdf.pages):
+            text = page.extract_text() or ""
+            lines = [line.strip() for line in text.split('\n') if line.strip()]
+            raw_pages.append({"pagina": idx + 1, "linhas": lines})
+    return raw_pages
+
 def parse_pdf(pdf_file):
     records = []
     current_invoice = None
 
     # Regex Patterns
-    # Busca "Number / Date" seguido pelo número da invoice (ex: Number / Date 12345678)
     invoice_pattern = re.compile(r'Number\s*/\s*Date\s+([A-Za-z0-9\-_]+)', re.IGNORECASE)
-    
-    # Captura a linha do item:
-    # 1. Item ID (6 dígitos) -> \b\d{6}\b
-    # 2. PartNumber (9 dígitos) -> (\d{9})
-    # 3. Descrição (texto) -> (.*?)
-    # 4. Quantidade -> ([\d\.,]+)
-    # 5. Peso Total (Net) -> ([\d\.,]+)
-    # 6. Preço Total (Total) -> ([\d\.,]+)
     item_pattern = re.compile(
         r'\b\d{6}\b\s+(\d{9})\s+(.*?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)$'
     )
@@ -33,13 +34,11 @@ def parse_pdf(pdf_file):
             for line in lines:
                 line_clean = line.strip()
 
-                # Verifica se há atualização de Invoice na página/linha
                 inv_match = invoice_pattern.search(line_clean)
                 if inv_match:
                     current_invoice = inv_match.group(1)
                     continue
 
-                # Busca padrão de itens
                 item_match = item_pattern.search(line_clean)
                 if item_match and current_invoice:
                     part_number = item_match.group(1)
@@ -58,31 +57,46 @@ def parse_pdf(pdf_file):
     return pd.DataFrame(records)
 
 # Interface Streamlit
-st.set_page_config(page_title="PDF Extractor to Excel", layout="wide")
-st.title("📄 Extrator de PDF para Excel")
-st.write("Faça o upload do documento PDF para extrair as Invoices e itens correspondentes.")
+st.set_page_config(page_title="Leitor e Extrator de PDF", layout="wide")
+st.title("📄 Inspeção e Extração de PDF para Excel")
 
 uploaded_file = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
 
 if uploaded_file is not None:
-    with st.spinner("Processando e extraindo dados do PDF..."):
-        df = parse_pdf(uploaded_file)
+    # Criação de abas para separar a pré-visualização da tabela final
+    tab_inspect, tab_result = st.tabs(["🔍 Inspeção das Linhas Lidas (Pré-processamento)", "📊 Tabela Final Extraída"])
 
-    if not df.empty:
-        st.success(f"Extração concluída! {len(df)} itens encontrados.")
-        st.dataframe(df, use_container_width=True)
+    with tab_inspect:
+        st.subheader("Texto Cru Extraído por Página")
+        st.caption("Verifique aqui como o leitor lê as linhas do PDF para entender se o layout está correto.")
+        
+        pages_data = inspect_pdf_text(uploaded_file)
+        
+        for page in pages_data:
+            with st.expander(f"Página {page['pagina']} ({len(page['linhas'])} linhas detectadas)", expanded=(page['pagina'] == 1)):
+                # Exibe em formato de tabela interativa para fácil inspeção
+                df_lines = pd.DataFrame(page['linhas'], columns=["Linha de Texto Capturada"])
+                st.dataframe(df_lines, use_container_width=True)
 
-        # Exportação para Excel em memória
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name='Invoices')
-        buffer.seek(0)
+    with tab_result:
+        uploaded_file.seek(0)  # Reseta o ponteiro do arquivo
+        with st.spinner("Processando extração..."):
+            df = parse_pdf(uploaded_file)
 
-        st.download_button(
-            label="📥 Baixar Planilha Excel",
-            data=buffer,
-            file_name="relatorio_invoices.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.warning("Nenhum dado no padrão esperado foi localizado no PDF. Verifique a estrutura do documento.")
+        if not df.empty:
+            st.success(f"{len(df)} itens identificados e estruturados com sucesso!")
+            st.dataframe(df, use_container_width=True)
+
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False, sheet_name='Invoices')
+            buffer.seek(0)
+
+            st.download_button(
+                label="📥 Baixar Planilha Excel",
+                data=buffer,
+                file_name="relatorio_invoices.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.error("Nenhum item foi capturado. Compare os padrões das linhas na aba 'Inspeção' para ajustar os filtros.")
