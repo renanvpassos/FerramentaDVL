@@ -1,101 +1,97 @@
 import streamlit as st
-import pdfplumber
 import pandas as pd
-import re
-import io
-import pytesseract
-from pdf2image import convert_from_bytes
-from PIL import Image
+from io import BytesIO
 
-def extract_text_ocr(pdf_bytes):
-    """Converte páginas PDF para imagem e roda OCR com Tesseract."""
-    # Transforma PDF em lista de imagens PIL (300 DPI para melhor precisão)
-    images = convert_from_bytes(pdf_bytes, dpi=300)
-    pages_ocr_text = []
+# Configuração da página do Streamlit
+st.set_page_config(page_title="Tratamento planilha DVL", layout="centered")
 
-    for idx, img in enumerate(images):
-        # Roda OCR especificando Português e Inglês
-        text = pytesseract.image_to_string(img, lang='por+eng')
-        pages_ocr_text.append({"pagina": idx + 1, "texto": text})
+st.title("📊 Tratamento planilha DVL")
+st.markdown("Insira os parâmetros abaixo, suba os arquivos e realize os cálculos automaticamente.")
 
-    return pages_ocr_text
+# --- SEÇÃO 1: PARÂMETROS DA INTERFACE ---
+st.subheader("1. Configurações Padrão")
+# Campo do ICMS posicionado no topo do fluxo principal
+valor_icms = st.text_input("Valor do ICMS padrão (será aplicado em todas as linhas):", value="18")
 
-def parse_ocr_records(pages_ocr_text):
-    """Processa o texto gerado pelo OCR aplicando Regex."""
-    records = []
-    current_invoice = None
+st.markdown("---")
 
-    # Regex flexibilizados para tolerar pequenas falhas do OCR
-    invoice_pattern = re.compile(r'Number\s*[/|\\]?\s*Date\s+([A-Za-z0-9\-_]+)', re.IGNORECASE)
-    
-    # Busca padrão de itens: PartNumber de 9 dígitos + valores
-    item_pattern = re.compile(
-        r'\b\d{6}\b\s+(\d{9})\s+(.*?)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)$'
-    )
+# --- SEÇÃO 2: UPLOAD DOS ARQUIVOS ---
+st.subheader("2. Upload dos Arquivos")
+arquivo_bd = st.file_uploader("Suba a planilha de BANCO DE DADOS (Excel)", type=["xlsx", "xls"])
+arquivo_tratar = st.file_uploader("Suba a PLANILHA A SER TRATADA (Excel)", type=["xlsx", "xls"])
 
-    for page_data in pages_ocr_text:
-        lines = page_data["texto"].split('\n')
-        for line in lines:
-            line_clean = line.strip()
-            if not line_clean:
-                continue
+if arquivo_bd and arquivo_tratar:
+    st.success("Arquivos carregados com sucesso! Processando...")
 
-            # Busca Invoice
-            inv_match = invoice_pattern.search(line_clean)
-            if inv_match:
-                current_invoice = inv_match.group(1)
-                continue
+    try:
+        # Lendo as planilhas
+        df_bd = pd.read_excel(arquivo_bd)
+        df_tratar = pd.read_excel(arquivo_tratar)
 
-            # Busca Item
-            item_match = item_pattern.search(line_clean)
-            if item_match and current_invoice:
-                records.append({
-                    "Invoice": current_invoice,
-                    "PartNumber": item_match.group(1),
-                    "Quantidade": item_match.group(3),
-                    "PesoTotal": item_match.group(4),
-                    "PrecoTotal": item_match.group(5)
-                })
+        # Padronizando o nome das colunas para evitar erros de espaços ou maiúsculas/minúsculas
+        df_bd.columns = df_bd.columns.str.strip()
+        df_tratar.columns = df_tratar.columns.str.strip()
 
-    return pd.DataFrame(records)
+        # Validação de colunas necessárias no Banco de Dados
+        colunas_bd_obrigatorias = ['Material', 'peso liquido']
+        validacao_bd = all(col in df_bd.columns for col in colunas_bd_obrigatorias)
 
-# Interface Streamlit
-st.set_page_config(page_title="Extrator PDF via OCR", layout="wide")
-st.title("👁️ Extrator de PDF com OCR (Reconhecimento Óptico)")
+        # Validação de colunas necessárias na Planilha a ser tratada
+        colunas_tratar_obrigatorias = ['PARTNUMBER', 'QUANTIDADE']
+        validacao_tratar = all(col in df_tratar.columns for col in colunas_tratar_obrigatorias)
 
-uploaded_file = st.file_uploader("Upload do arquivo PDF", type=["pdf"])
+        if not validacao_bd:
+            st.error(
+                f"O Banco de Dados precisa conter as colunas: {colunas_bd_obrigatorias}. Encontradas: {list(df_bd.columns)}")
+        elif not validacao_tratar:
+            st.error(
+                f"A Planilha a ser tratada precisa conter as colunas: {colunas_tratar_obrigatorias}. Encontradas: {list(df_tratar.columns)}")
+        else:
+            # --- Início do Tratamento ---
 
-if uploaded_file is not None:
-    pdf_bytes = uploaded_file.read()
+            # 1. Cria a coluna ICMS no final com o valor informado no campo acima
+            df_tratar['ICMS'] = valor_icms
 
-    tab_ocr, tab_result = st.tabs(["🔍 Visualização do Texto Reconhecido (OCR)", "📊 Planilha Final Extraída"])
+            # 2. Faz o cruzamento (Merge) entre as tabelas
+            # Remove duplicadas do banco de dados na coluna chave para não duplicar linhas na planilha final
+            df_bd_limpo = df_bd.drop_duplicates(subset=['Material'])
 
-    with st.spinner("Executando OCR nas páginas do PDF (processando imagens e caracteres)..."):
-        pages_ocr = extract_text_ocr(pdf_bytes)
-        df_final = parse_ocr_records(pages_ocr)
+            df_resultado = pd.merge(
+                df_tratar,
+                df_bd_limpo[['Material', 'peso liquido']],
+                left_on='PARTNUMBER',
+                right_on='Material',
+                how='left'
+            )
 
-    with tab_ocr:
-        st.subheader("Texto Lido via OCR por Página")
-        st.caption("Confira aqui se o motor OCR conseguiu identificar corretamente os números e palavras.")
-        for page in pages_ocr:
-            with st.expander(f"Página {page['pagina']}", expanded=(page['pagina'] == 1)):
-                st.code(page["texto"], language="text")
+            # 3. Converte colunas para numérico para evitar erros de tipo no cálculo
+            df_resultado['QUANTIDADE'] = pd.to_numeric(df_resultado['QUANTIDADE'], errors='coerce').fillna(0)
+            df_resultado['peso liquido'] = pd.to_numeric(df_resultado['peso liquido'], errors='coerce').fillna(0)
 
-    with tab_result:
-        if not df_final.empty:
-            st.success(f"Extração concluída com sucesso! {len(df_final)} registros encontrados.")
-            st.dataframe(df_final, use_container_width=True)
+            # 4. Calcula o PESOTOTAL (criado logo após a coluna ICMS)
+            df_resultado['PESOTOTAL'] = df_resultado['peso liquido'] * df_resultado['QUANTIDADE']
 
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_final.to_excel(writer, index=False, sheet_name='Invoices_OCR')
-            buffer.seek(0)
+            # 5. Remove colunas extras trazidas do banco de dados para manter o layout limpo
+            if 'Material' in df_resultado.columns:
+                df_resultado = df_resultado.drop(columns=['Material', 'peso liquido'])
 
+            # Exibe uma prévia do resultado na tela
+            st.subheader("💡 Prévia do Resultado")
+            st.dataframe(df_resultado.head(10))
+
+            # --- Preparação do arquivo para Download ---
+            saida_excel = BytesIO()
+            with pd.ExcelWriter(saida_excel, engine='xlsxwriter') as writer:
+                df_resultado.to_excel(writer, index=False, sheet_name='Planilha Tratada')
+            saida_excel.seek(0)
+
+            st.subheader("3. Baixar Arquivo Final")
             st.download_button(
-                label="📥 Baixar Planilha Excel",
-                data=buffer,
-                file_name="relatorio_invoices_ocr.xlsx",
+                label="📥 Baixar Planilha Tratada (Excel)",
+                data=saida_excel,
+                file_name="planilha_tratada_final.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-        else:
-            st.error("Nenhum item no padrão foi identificado. Verifique o texto extraído na aba 'Visualização' para ajustar os critérios.")
+
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao processar os arquivos: {e}")
