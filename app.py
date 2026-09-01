@@ -3,9 +3,9 @@ import pandas as pd
 from io import BytesIO
 
 # Configuração da página do Streamlit
-st.set_page_config(page_title="Tratamento planilha DVL", layout="centered")
+st.set_page_config(page_title="Tratamento planilha Delaval", layout="centered")
 
-st.title("📊 Tratamento planilha DVL")
+st.title("📊 Tratamento planilha Delaval")
 st.markdown("Insira os parâmetros abaixo, suba os arquivos e realize os cálculos automaticamente.")
 
 # --- SEÇÃO 1: PARÂMETROS DA INTERFACE ---
